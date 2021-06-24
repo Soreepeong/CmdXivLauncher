@@ -1,0 +1,4 @@
+
+# If it becomes an actual IDEA project, then remove the following line.
+.idea
+*.iml
