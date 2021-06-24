@@ -523,13 +523,13 @@ def __main__(prog, *args):
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("-i", "--installation-directory", action="store",
                         type=str, dest="xiv_dir", default=None,
-                        help="FFXIV root installation directory. Will try to look up in registry if not specified.")
+                        help="FFXIV root installation directory. Look up in registry if not specified.")
     parser.add_argument("-l", "--language", action="store",
                         type=XivLanguage.parse, dest="language", default=XivLanguage.parse(None),
-                        help="Language. Available values are English, French, German, and Japanese. Will use system "
+                        help="Language. Available values are E(nglish), F(rench), G(erman), and J(apanese). Use system "
                              "language if not specified, and will fall back to English if unavailable.")
     parser.add_argument("-s", "--steam", action="store_true", dest="is_steam",
-                        help="Will identify as running from steam if set.")
+                        help="Identify as running from steam.")
     parser.add_argument("-u", "--user", action="store", required=True,
                         type=formatted_str_generator("user", "User: "), dest="user",
                         help="Your user ID. Encoded value is accepted.")
@@ -544,13 +544,13 @@ def __main__(prog, *args):
                         help="Your OTP Key. Encoded value is accepted. pyotp is required.")
     parser.add_argument("-x", "--proxy", action="store",
                         type=str, dest="proxy",
-                        help="Proxy to use.")
+                        help="Proxy URL to use in format of http://0.0.0.0:80")
     parser.add_argument("-a", "--admin-chain", action="store_true", dest="admin_chain",
                         help="Run chain as admin.")
     parser.add_argument("-d", "--debug", action="store_true",
-                        help="Prints parsed argument and exit instead of logging in.")
+                        help="Print parsed argument and exit instead of logging in.")
     parser.add_argument("chain", nargs=argparse.REMAINDER, type=str,
-                        help="Runs specified program after detecting that a game window is running. ")
+                        help="Run specified program after detecting that a game window is running. ")
     args = parser.parse_args(args)
     if args.otp_key:
         if args.otp:
