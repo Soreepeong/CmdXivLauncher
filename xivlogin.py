@@ -676,7 +676,13 @@ def __main__(prog, *args):
                     enc_file, passphrase = enc_file.split(',', 1)
                 except ValueError:
                     if not passphrase:
-                        passphrase = getpass.getpass(f"Password for encrypting {enc_file}: ")
+                        while True:
+                            passphrase = getpass.getpass(f"Passphrase for encrypting {enc_file}: ")
+                            confirm_passphrase = getpass.getpass(f"Confirm passphrase for encrypting {enc_file}: ")
+                            if passphrase == confirm_passphrase:
+                                break
+                            else:
+                                print("Passwords do not match.\n")
                 salt = get_random_bytes(8)
                 cipher = AES.new(
                     hash_secret_raw(
