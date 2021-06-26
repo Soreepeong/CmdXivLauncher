@@ -114,11 +114,14 @@ def formatted_str_generator(key: str, descr: str, input_fn: callable = input):
                     AES.MODE_CTR,
                     nonce = data[:8],
                 )
-                try:
-                    data = cipher.decrypt(data[16:]).decode(encoding='utf-8')
-                    decrypted_cache[data_source] = data
-                except UnicodeDecodeError:
-                    raise ValueError('Decrypted string not decodable (maybe check the passphrase?)')
+                while True:
+                    try:
+                        data = cipher.decrypt(data[16:]).decode(encoding='utf-8')
+                        decrypted_cache[data_source] = data
+                    except UnicodeDecodeError:
+                        passphrase = getpass.getpass(f"Passphrase for {data_source}: ")
+                        continue
+                    break
         elif format_type == "clipboard":
             data_source_type = data
             data = get_clipboard_text()
