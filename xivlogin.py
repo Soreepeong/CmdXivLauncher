@@ -29,6 +29,11 @@ You can use the following format to pass login parameters where applicable.
 * clipboard,text
 * clipboard,json
 * interactive
+* enc,(text|json),(path or - for stdin)[,passphrase]
+
+For the --enc parameter, you can use the following format.
+* path[,password]
+* user[+p[+..]],(text|json),(path or - for stdout)[,passphrase][;user[+p[+..],..]]
 
 Examples:
 * python xivlogin.py -u plain,myusername -p hex,2a2b2c2d2e2f3031323334 -o clipboard,text
@@ -43,6 +48,7 @@ Examples:
     ```
 * python xivlogin.py -u plain,myusername -p interactive -o interactive
 """.strip()
+decrypted_cache = {}
 
 
 def formatted_str_generator(key: str, descr: str, input_fn: callable = input):
@@ -71,6 +77,48 @@ def formatted_str_generator(key: str, descr: str, input_fn: callable = input):
             else:
                 with open(data_source) as fp:
                     data = fp.read()
+        if format_type == "enc":
+            try:
+                import argon2
+                from argon2.low_level import hash_secret_raw
+                from Crypto.Cipher import AES
+                from Crypto.Random import get_random_bytes
+            except ImportError:
+                print("You need to install pycryptodom and argon2-cffi to use the encryption feature. Run `python -m pip install pycryptodom argon2-cffi`.")
+                return -1
+            data_source_type, data_source = data.split(",", 1)
+            try:
+                data_source, passphrase = data_source.split(",", 1)
+            except ValueError:
+                passphrase = None
+            if data_source in decrypted_cache.keys():
+                data = decrypted_cache[data_source]
+            else:
+                if not passphrase:
+                    passphrase = getpass.getpass(f"Passphrase for {data_source}: ")
+                if data_source == "-":
+                    data = sys.stdin.buffer.read()
+                else:
+                    with open(data_source, 'rb') as fp:
+                        data = fp.read()
+                cipher = AES.new(
+                    hash_secret_raw(
+                        secret=passphrase.encode(encoding='utf-8'),
+                        salt=data[8:16],
+                        time_cost=2,
+                        memory_cost=102400,
+                        parallelism=8,
+                        hash_len=32,
+                        type=argon2.Type.ID
+                    ),
+                    AES.MODE_CTR,
+                    nonce = data[:8],
+                )
+                try:
+                    data = cipher.decrypt(data[16:]).decode(encoding='utf-8')
+                    decrypted_cache[data_source] = data
+                except UnicodeDecodeError:
+                    raise ValueError('Decrypted string not decodable (maybe check the passphrase?)')
         elif format_type == "clipboard":
             data_source_type = data
             data = get_clipboard_text()
@@ -549,6 +597,12 @@ def __main__(prog, *args):
                         help="Run chain as admin.")
     parser.add_argument("-d", "--debug", action="store_true",
                         help="Print parsed argument and exit instead of logging in.")
+    parser.add_argument("--enc", action="store", type=str, dest="encrypt", default=None,
+                        help="Instead of logging in, generate encrypted files with parameters as contents. "
+                             "Encoded value is accepted. If no passphrase is provided, it will be provided "
+                             "interactively. If passphrase is only given for some files and not others, the "
+                             "passphrase given for the previous file will be used. If the parameter is just a path, "
+                             "it will be interpreted as storing all given parameters to the file as a json format.")
     parser.add_argument("chain", nargs=argparse.REMAINDER, type=str,
                         help="Run specified program after detecting that a game window is running. ")
     args = parser.parse_args(args)
@@ -567,6 +621,77 @@ def __main__(prog, *args):
         args.otp = ""
     if args.debug:
         print(args)
+        return 0
+    if args.encrypt:
+        try:
+            import argon2
+            from argon2.low_level import hash_secret_raw
+            from Crypto.Cipher import AES
+            from Crypto.Random import get_random_bytes
+        except ImportError:
+            print("You need to install pycryptodom and argon2-cffi to use the encryption feature. Run `python -m pip install pycryptodom argon2-cffi`.")
+            return -1
+        passphrase = None
+        enc_files = args.encrypt.split(';')
+        for enc_file in enc_files:
+            if enc_file:
+                data = {}
+                try:
+                    params, format_type, enc_file = enc_file.split(',', 2)
+                    params = params.lower().split('+')
+                    format_type = format_type.lower()
+                    if len(params) > 1 and format_type not in ('json'):
+                        print('Format type must be container type such as json to contain multiple values.')
+                        return -1
+                    if format_type == 'json':
+                        if 'u' in params or 'user' in params:
+                            data['user'] = args.user
+                        if 'p' in params or 'password' in params:
+                            data['password'] = args.password
+                        if 'k' in params or 'otp-key' in params:
+                            data['otp_key'] = args.otp_key
+                        data = json.dumps(data).encode(encoding='utf-8')
+                    else:
+                        if 'u' in params or 'user' in params:
+                            data = args.user
+                        elif 'p' in params or 'password' in params:
+                            data = args.password
+                        elif 'k' in params or 'otp-key' in params:
+                            data = args.otp_key
+                        data = data.encode(encoding='utf-8')
+                        if format_type == 'text':
+                            pass
+                        else:
+                            raise Exception(f'Invalid internal format type: {format_type}')
+                except ValueError:
+                    data['user'] = args.user
+                    data['password'] = args.password
+                    if args.otp_key:
+                        data['otp_key'] = args.otp_key
+                    data = json.dumps(data).encode(encoding='utf-8')
+                try:
+                    enc_file, passphrase = enc_file.split(',', 1)
+                except ValueError:
+                    if not passphrase:
+                        passphrase = getpass.getpass(f"Password for encrypting {enc_file}: ")
+                salt = get_random_bytes(8)
+                cipher = AES.new(
+                    hash_secret_raw(
+                        secret=passphrase.encode(encoding='utf-8'),
+                        salt=salt,
+                        time_cost=2,
+                        memory_cost=102400,
+                        parallelism=8,
+                        hash_len=32,
+                        type=argon2.Type.ID
+                    ),
+                    AES.MODE_CTR,
+                )
+                cpdata = cipher.encrypt(data)
+                if enc_file == '-':
+                    sys.stdout.buffer.write(cipher.nonce+salt+cpdata)
+                with open(enc_file, 'wb') as fp:
+                    fp.write(cipher.nonce+salt+cpdata)
         return 0
     print(f"Logging in as {args.user}... (steam={args.is_steam}, language={args.language.name})")
     XivLogin(language=args.language,
