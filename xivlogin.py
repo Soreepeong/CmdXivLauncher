@@ -101,21 +101,21 @@ def formatted_str_generator(key: str, descr: str, input_fn: callable = input):
                 else:
                     with open(data_source, 'rb') as fp:
                         data = fp.read()
-                cipher = AES.new(
-                    hash_secret_raw(
-                        secret=passphrase.encode(encoding='utf-8'),
-                        salt=data[8:16],
-                        time_cost=2,
-                        memory_cost=102400,
-                        parallelism=8,
-                        hash_len=32,
-                        type=argon2.Type.ID
-                    ),
-                    AES.MODE_CTR,
-                    nonce = data[:8],
-                )
                 while True:
                     try:
+                        cipher = AES.new(
+                            hash_secret_raw(
+                                secret=passphrase.encode(encoding='utf-8'),
+                                salt=data[8:16],
+                                time_cost=2,
+                                memory_cost=102400,
+                                parallelism=8,
+                                hash_len=32,
+                                type=argon2.Type.ID
+                            ),
+                            AES.MODE_CTR,
+                            nonce = data[:8],
+                        )
                         data = cipher.decrypt(data[16:]).decode(encoding='utf-8')
                         decrypted_cache[data_source] = data
                     except UnicodeDecodeError:
