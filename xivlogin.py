@@ -4,6 +4,7 @@ import ctypes.wintypes
 import datetime
 import enum
 import functools
+import html.parser
 import getpass
 import hashlib
 import json
@@ -13,11 +14,13 @@ import re
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import typing
 import urllib.parse
 import urllib.request
 import urllib.response
+import webbrowser
 
 FORMATTABLE_STRING_DESCRIPTION = r"""
 You can use the following format to pass login parameters where applicable. 
@@ -282,15 +285,31 @@ def get_language_list() -> typing.List[str]:
 
 
 class XivBootNeedPatchException(EnvironmentError):
-    pass
+    def __init__(self, msg=None):
+        super().__init__(msg or "Update required")
 
 
 class XivGameNeedPatchException(EnvironmentError):
-    pass
+    def __init__(self, msg=None):
+        super().__init__(msg or "Update required")
 
 
 class XivLoginError(ValueError):
     pass
+
+
+class XivClientRegion(enum.IntEnum):
+    International = 0
+    Korean = 1
+
+    @classmethod
+    def parse(cls, x):
+        if x is None:
+            return XivClientRegion.International
+        if isinstance(x, str) and len(x) >= 1:
+            if x[0].lower() == 'k':
+                return XivClientRegion.Korean
+        return XivClientRegion.International
 
 
 class XivLanguage(enum.IntEnum):
@@ -373,7 +392,52 @@ class XivVersionInfo:
         return f"{self.hash(ex_ver - 1)}\nex{ex_ver}\t{ver}"
 
 
-class XivLogin:
+def request(url: str,
+            data: typing.Union[dict, str, bytes, None] = None,
+            headers: typing.Optional[dict] = None,
+            proxy: typing.Optional[str] = None
+            ) -> urllib.response.addinfourl:
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    elif isinstance(data, dict):
+        data = urllib.parse.urlencode(data).encode("utf-8")
+
+    if headers is None:
+        headers = {}
+    req = urllib.request.Request(url, data=data, headers=headers)
+    if proxy is not None:
+        proxy = urllib.parse.urlparse(proxy)
+        req.set_proxy(proxy.netloc, proxy.scheme.lower())
+        if proxy.username is not None or proxy.password is not None:
+            auth = base64.b64encode(f'{proxy.username or ""}:{proxy.password or ""}')
+            req.headers["Proxy-Authorization"] = f"Basic {auth}"
+    resp: urllib.response.addinfourl = urllib.request.urlopen(req)
+    if resp.code // 100 != 2:
+        raise RuntimeError(f"Remote error {resp.code}")
+    return resp
+
+
+def run_and_wait(*args):
+    proc_info = CreateProcessInformation()
+    start_info = CreateProcessStartupInfoW()
+    start_info.cb = ctypes.sizeof(start_info)
+
+    if not ctypes.windll.kernel32.CreateProcessW(
+            args[0], " ".join(f'"{x}"' if ' ' in x else x for x in args), None, None, True, 0, None, None,
+            ctypes.byref(start_info), ctypes.byref(proc_info)):
+        raise ctypes.WinError()
+    try:
+        if ctypes.windll.user32.WaitForInputIdle(proc_info.hProcess, INFINITE) == WAIT_FAILED:
+            raise ctypes.WinError()
+        until = time.time() + 5
+        while until > time.time() and ctypes.windll.user32.FindWindowExW(None, None, "FFXIVGAME", None) is not None:
+            time.sleep(0.1)
+    finally:
+        ctypes.windll.kernel32.CloseHandle(proc_info.hThread)
+        ctypes.windll.kernel32.CloseHandle(proc_info.hProcess)
+
+
+class XivInternationalLogin:
     _WEB_USER_AGENT_FORMAT = "SQEXAuthor/2.0.0(Windows 6.2; ja-jp; {computer_id})"
     _BOOT_PATCH_CHECK_URL_FORMAT = ("http://patch-bootver.ffxiv.com/http/win32/ffxivneo_release_boot/{boot_ver}/"
                                     "?time={timestamp:%Y-%m-%d-%H-%M}")
@@ -443,21 +507,7 @@ class XivLogin:
 
     def _request(self, url: str, data: typing.Union[dict, str, bytes, None] = None,
                  headers: typing.Optional[dict] = None) -> urllib.response.addinfourl:
-        if isinstance(data, str):
-            data = data.encode("utf-8")
-        elif isinstance(data, dict):
-            data = urllib.parse.urlencode(data).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers=headers or {})
-        if self._proxy is not None:
-            proxy = urllib.parse.urlparse(self._proxy)
-            req.set_proxy(proxy.netloc, proxy.scheme.lower())
-            if proxy.username is not None or proxy.password is not None:
-                auth = base64.b64encode(f'{proxy.username or ""}:{proxy.password or ""}')
-                req.headers["Proxy-Authorization"] = f"Basic {auth}"
-        resp: urllib.response.addinfourl = urllib.request.urlopen(req)
-        if resp.code // 100 != 2:
-            raise RuntimeError(f"Remote error {resp.code}")
-        return resp
+        return request(url, data, headers, self._proxy)
 
     def _exec_launcher(self):
         return subprocess.Popen(os.path.join(self._xiv_dir, "boot", "ffxivboot.exe"))
@@ -485,7 +535,7 @@ class XivLogin:
             headers={
                 "User-Agent": self._user_agent,
             },
-            )
+        )
         text = stored.read().decode("utf-8")
         stored_value = self._LANDING_STORED_REGEX.search(text).group(1)
         return stored_value, stored.url
@@ -514,9 +564,7 @@ class XivLogin:
         if login_result is None:
             login_result = self._LOGIN_ERROR_REGEX.search(text)
             if login_result is not None:
-                print("\t=>", login_result.group(1))
                 raise XivLoginError(login_result.group(1))
-            print("\t=> Unknown error.")
             raise XivLoginError(f"Invalid response: {text}")
         login_result = login_result.group(1).split(",")
         login_result = dict(zip(login_result[0::2], login_result[1::2]))
@@ -543,9 +591,12 @@ class XivLogin:
             raise XivGameNeedPatchException(text)
         return session.headers.get("X-Patch-Unique-Id")
 
-    def _exec(self, game_sid: str, max_ex: int):
+    def login(self, user_id: str, password: str, otp: str):
+        self._check_boot_version()
+        max_ex, web_sid = self._login(user_id, password, otp)
+        game_sid = self._get_game_sid(web_sid, max_ex)
         print("* Starting game...")
-        args = [
+        run_and_wait(
             os.path.join(self._xiv_dir, "game", "ffxiv_dx11.exe"),
             f"DEV.DataPathType=1",
             f"DEV.MaxEntitledExpansionID={max_ex}",
@@ -554,30 +605,183 @@ class XivLogin:
             f"SYS.Region=2",
             f"language={self._language.value}",
             f"ver={self._version.game}",
-        ]
-        proc_info = CreateProcessInformation()
-        start_info = CreateProcessStartupInfoW()
-        start_info.cb = ctypes.sizeof(start_info)
+        )
 
-        if not ctypes.windll.kernel32.CreateProcessW(
-                args[0], " ".join(f'"{x}"' if ' ' in x else x for x in args), None, None, True, 0, None, None,
-                ctypes.byref(start_info), ctypes.byref(proc_info)):
-            raise ctypes.WinError()
-        try:
-            if ctypes.windll.user32.WaitForInputIdle(proc_info.hProcess, INFINITE) == WAIT_FAILED:
-                raise ctypes.WinError()
-            until = time.time() + 5
-            while until > time.time() and ctypes.windll.user32.FindWindowExW(None, None, "FFXIVGAME", None) is None:
-                time.sleep(0.1)
-        finally:
-            ctypes.windll.kernel32.CloseHandle(proc_info.hThread)
-            ctypes.windll.kernel32.CloseHandle(proc_info.hProcess)
+
+class FormReader(html.parser.HTMLParser):
+    def error(self, message):
+        raise RuntimeError(message)
+
+    def __init__(self):
+        super().__init__()
+        self._forms = {}
+        self._stack = []
+        self._stack_names = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "form":
+            self._stack.append([])
+            self._stack_names.append(dict(attrs).get("name", "unnamed"))
+        if tag == "input":
+            self._stack[-1].append(dict(attrs))
+
+    def handle_endtag(self, tag):
+        if tag == "form" and self._stack:
+            self._forms[self._stack_names.pop()] = self._stack.pop()
+
+    def work(self, data):
+        self.feed(data)
+
+        while self._stack:
+            self._forms[self._stack_names.pop()] = self._stack.pop()
+
+        return self._forms
+
+
+class XivKoreaLogin:
+    _BASE_URL = "https://newlauncher.ff14.co.kr"
+    _COMMON_HEADERS = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3",
+        "Accept-Language": "ko",
+        "Connection": "close",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.157 Safari/537.36",
+    }
+
+    def __init__(self,
+                 xiv_dir: typing.Optional[str] = None,
+                 proxy: typing.Optional[str] = None,
+                 ):
+        if xiv_dir is None:
+            r = subprocess.Popen([
+                'reg', 'query',
+                r"HKCR\ff14kr\DefaultIcon",
+                '/ve'],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT)
+            stdout, _ = r.communicate()
+            if r.returncode != 0:
+                raise EnvironmentError("FFXIV Installation not found. You will have to specify with -x option.")
+            xiv_dir = stdout.decode("utf-8").split("REG_SZ", 1)[1].split(",")[0].strip()
+            xiv_dir = os.path.normpath(os.path.join(xiv_dir, os.path.pardir, os.path.pardir))
+            print("FFXIV Installation found at", xiv_dir)
+
+        self._xiv_dir = xiv_dir
+        self._proxy = proxy
+
+    def _request(self, url: str, data: typing.Union[dict, str, bytes, None] = None,
+                 headers: typing.Optional[dict] = None) -> urllib.response.addinfourl:
+        if headers is None:
+            headers = {}
+        headers.update(self._COMMON_HEADERS)
+        return request(self._BASE_URL + url, data, headers, self._proxy)
 
     def login(self, user_id: str, password: str, otp: str):
-        self._check_boot_version()
-        max_ex, web_sid = self._login(user_id, password, otp)
-        game_sid = self._get_game_sid(web_sid, max_ex)
-        return self._exec(game_sid, max_ex)
+        print("* Initializing...")
+        r = self._request("/")
+        text = r.read().decode("utf-8")
+        cookie = "; ".join([x.split(";")[0] for x in r.headers.get_all("Set-Cookie")])
+
+        form = {x["name"]: x.get("value", "") for x in FormReader().work(text)["loginForm"]
+                if "name" in x and (x["type"] != "checkbox" or "checked" in x)}
+        form["settingMemberID"] = form["memberID"] = user_id
+        form["passWord"] = password
+        form["BDC_BackWorkaround_LauncherLoginCaptcha"] = "1"
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg") as fp:
+            while True:
+                fp.seek(0, os.SEEK_SET)
+                fp.truncate()
+                print("* Downloading captcha image...")
+                r = self._request(f"/BotDetectCaptcha.ashx?get=image&c=LauncherLoginCaptcha"
+                                  f"&t={form['BDC_VCID_LauncherLoginCaptcha']}",
+                                  headers={
+                                      "Cookie": cookie,
+                                      "Origin": "https://newlauncher.ff14.co.kr",
+                                      "Referer": "https://newlauncher.ff14.co.kr/",
+                                  })
+                fp.write(r.read())
+                fp.flush()
+                webbrowser.open(fp.name)
+                captcha = input("* Enter captcha: ").strip()
+                if captcha == "":
+                    continue
+                form["CaptchaCode"] = captcha
+                print("\t=> Verifying...")
+                r = self._request("/LauncherFF/LauncherProcess",
+                                  urllib.parse.urlencode(form),
+                                  {
+                                      "Cookie": cookie,
+                                      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                                      "Origin": "https://newlauncher.ff14.co.kr",
+                                      "Referer": "https://newlauncher.ff14.co.kr/",
+                                  })
+                d = json.loads(r.read().decode())
+                if d["result"] == "0":
+                    break
+                elif d["result"] == "-101":
+                    raise XivLoginError("Invalid member")
+                elif d["result"] == "-102":
+                    print("\t=> Invalid input")
+                elif d["result"] == "-106":
+                    print("\t=> Invalid captcha; try again")
+                else:
+                    print("\t=> Error:", d["result"])
+
+        if d["loginResult"] == "E":
+            raise XivLoginError("Invalid ID")
+        elif d["loginResult"] == "P":
+            raise XivLoginError("Invalid password")
+        elif d["loginResult"] != "O":
+            raise XivLoginError(f"Run official launcher to confirm the problem ({d['loginResult']})")
+
+        if d["motpUse"] == 'O':
+            print("* Processing OTP...")
+            r = self._request("/LauncherFF/OTPCheck",
+                              {
+                                  "motpID": d["motpID"],
+                                  "otpNum": otp,
+                                  "csiteNo": d["csiteNo"],
+                                  "memberKey": d["memberKey"],
+                                  "memberID": d["memberID"],
+                              },
+                              {
+                                  "Cookie": cookie,
+                                  "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                                  "Origin": "https://newlauncher.ff14.co.kr",
+                                  "Referer": "https://newlauncher.ff14.co.kr/",
+                              })
+            r = json.loads(r.read().decode())
+            if r["Result"] != "":
+                raise XivLoginError(r["Result"])
+            form["memberKey"] = d["memberKey"]
+            form["otpNum"] = otp
+
+        form["passWord"] = ""
+        form["InternetCafeType"] = "0"
+        form["decideDX"] = form["decideAS"] = "1"
+        form["checkMemberID"] = "true"
+
+        print("* Generating game login token...")
+        r = self._request("/LauncherFF/MakeToken",
+                          form,
+                          {
+                              "Cookie": cookie,
+                              "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                          })
+        d = json.loads(r.read().decode())
+        token = d["toKen"]
+
+        print("* Starting game...")
+        run_and_wait(
+            os.path.join(self._xiv_dir, "game", "ffxiv_dx11.exe"),
+            f"DEV.LobbyHost01=lobbyf-live.ff14.co.kr",
+            f"DEV.LobbyPort01=54994",
+            f"DEV.GMServerHost=gm-live.ff14.co.kr",
+            f"DEV.TestSID={token}",
+            f"SYS.resetConfig=0",
+            f"DEV.SaveDataBankHost=config-dl-live.ff14.co.kr",
+        )
 
 
 @functools.cache
@@ -593,6 +797,8 @@ def __main__(prog, *args):
     parser.add_argument("-i", "--installation-directory", action="store",
                         type=str, dest="xiv_dir", default=None,
                         help="FFXIV root installation directory. Look up in registry if not specified.")
+    parser.add_argument("-c", "--client-region", action="store",
+                        type=XivClientRegion.parse, dest="client_region", default=XivClientRegion.parse(None))
     parser.add_argument("-l", "--language", action="store",
                         type=XivLanguage.parse, dest="language", default=XivLanguage.parse(None),
                         help="Language. Available values are E(nglish), F(rench), G(erman), and J(apanese). Use system "
@@ -631,18 +837,34 @@ def __main__(prog, *args):
         if args.otp:
             raise ValueError("Cannot provide both otp and otp key.")
 
-        try:
-            import pyotp
-        except ImportError:
-            print("You need to install pyotp to use otp-key feature. Run `python -m pip install pyotp`.")
-            return -1
+        if args.client_region == XivClientRegion.International:
+            try:
+                import pyotp
+            except ImportError:
+                print("You need to install pyotp to use otp-key feature. Run `python -m pip install pyotp`.")
+                return -1
 
-        args.otp = pyotp.TOTP(re.sub('[^A-Za-z0-9]', '', args.otp_key)).now()
+            args.otp = pyotp.TOTP(args.otp_key).now()
+
+        elif args.client_region == XivClientRegion.Korean:
+            try:
+                import uotp.token
+            except ImportError:
+                print("You need to install uotp to use otp-key feature. Run `python -m pip install uotp`.")
+                return -1
+
+            oid, seed = args.otp_key.split(":")
+            oid = int(oid)
+            seed = base64.decodebytes(seed.encode())
+            args.otp = uotp.token.OTPTokenGenerator(oid, seed).generate_token()
+
     elif not args.otp:
         args.otp = ""
+
     if args.debug:
         print(args)
         return 0
+      
     if args.encrypt:
         try:
             import argon2
@@ -720,12 +942,17 @@ def __main__(prog, *args):
                 with open(enc_file, 'wb') as fp:
                     fp.write(cipher.nonce+salt+cpdata)
         return 0
-    print(f"Logging in as {args.user}... (steam={args.is_steam}, language={args.language.name})")
-    XivLogin(language=args.language,
-             xiv_dir=args.xiv_dir,
-             is_steam=args.is_steam,
-             proxy=args.proxy,
-             ).login(args.user, args.password, args.otp)
+      
+    if args.client_region == XivClientRegion.International:
+        print(f"Logging in as {args.user}... (steam={args.is_steam}, language={args.language.name})")
+        XivInternationalLogin(language=args.language,
+                              xiv_dir=args.xiv_dir,
+                              is_steam=args.is_steam,
+                              proxy=args.proxy,
+                              ).login(args.user, args.password, args.otp)
+
+    elif args.client_region == XivClientRegion.Korean:
+        XivKoreaLogin(xiv_dir=args.xiv_dir, proxy=args.proxy).login(args.user, args.password, args.otp)
 
     if not args.chain:
         return 0
@@ -747,8 +974,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\t=> Operation canceled.")
         exit(-1)
-    except (XivLoginError, XivBootNeedPatchException, XivGameNeedPatchException):
-        exit(-1)
-    except Exception as e:
-        print(type(e), e)
+    except (XivLoginError, XivBootNeedPatchException, XivGameNeedPatchException) as e:
+        print(f"\t=> Error: {e}")
         exit(-1)
