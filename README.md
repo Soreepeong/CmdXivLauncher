@@ -47,8 +47,10 @@ You can use the following format to pass login parameters where applicable.
 * enc,(text|json),(path or - for stdin)[,passphrase]
 
 For the --enc parameter, you can use the following format.
-* path[,password]
+* path[,passphrase]
 * user[+p[+..]],(text|json),(path or - for stdout)[,passphrase][;user[+p[+..],..]]
+
+(a|b) means either a or b is required, [] means optional, .. means similar repeated sequences.
 
 Examples:
 * `python xivlogin.py -u plain,myusername -p hex,2a2b2c2d2e2f3031323334 -o clipboard,text`
@@ -62,6 +64,22 @@ Examples:
     }
     ```
 * `python xivlogin.py -u plain,myusername -p interactive -o interactive`
+
+* encrypt provided username, password, and otp key with passphrase from stdin
+** `python xivlogin.py --enc C:\test.enc -u user -p pass -k key`
+* similarly, provide passphrase 'encpass' on command line
+** `python xivlogin.py --enc C:\test.enc,encpass -u user -p pass -k key`
+* encrypt provided username and password to one json file with passphrase from stdin and otp key to a text file with passphrase 'encpass'
+** `python xivlogin.py --enc user+password,json,C:\userpass.enc;otp-key,text,C:\key.enc,encpass -u user -p pass -k key`
+* similarly, with abbreviation
+** `python xivlogin.py --enc u+p,json,C:\userpass.enc;k,text,C:\key.enc,encpass -u user -p pass -k key`
+
+* login with credentials from encrypted files and passphrase from stdin:
+** `python xivlogin.py -u enc,text,C:\username.enc -p enc,text,C:\passphrase.enc -k enc,text,C:\key.enc`
+* with a single encrypted json file:
+** `python xivlogin.py -u enc,json,C:\test.enc -p enc,json,C:\test.enc -k enc,json,C:\test.enc`
+* mix and match, with password provided on the command line (key.enc uses encpass2):
+** `python xivlogin.py -u enc,json,C:\test.enc,encpass1 -p enc,text,C:\pass.enc,encpass2 -k enc,text,C:\key.enc`
 
 ## Using with KeePass Open URL (Ctrl+U)
 Duplicate your Square Enix account information, using references for ID and password.
