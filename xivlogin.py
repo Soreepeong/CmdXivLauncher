@@ -7,6 +7,7 @@ import functools
 import html.parser
 import getpass
 import hashlib
+import importlib
 import json
 import os
 import platform
@@ -789,7 +790,37 @@ def read_stdin():
     return sys.stdin.read()
 
 
+def install_dependency(target_dir, *package_names):
+    print(f"Following packages are required: {', '.join(package_names)}")
+    r = input("Do you want to install those packages right now? ([Y]es/[n]o/[g]lobal) ").lower()
+    if r in ("y", "yes", "g", "global", ""):
+        try:
+            cmd = [sys.executable, "-m", "pip", "install"]
+            if r not in ("g", "global"):
+                if not os.path.exists(target_dir):
+                    os.mkdir(target_dir)
+                elif os.path.isfile(target_dir):
+                    print(f"Path {target_dir} is not a folder. Delete the file first.")
+                    return -1
+                cmd += ["-t", os.path.join(os.path.dirname(__file__), ".packages")]
+            cmd += package_names
+            subprocess.check_call(cmd)
+            importlib.invalidate_caches()
+            return {x: importlib.import_module(x) for x in package_names}
+        except subprocess.CalledProcessError:
+            print(f"Failed to install {package_names}. Try again later.")
+            return -1
+        except ImportError:
+            print(f"Failed to detect installed {package_names}. Try again later.")
+            return -1
+    else:
+        print(f"Run `python -m pip install {package_names}`.")
+        return -1
+
+
 def __main__(prog, *args):
+    package_dir = os.path.join(os.path.dirname(__file__), ".packages")
+    sys.path.insert(0, package_dir)
     parser = argparse.ArgumentParser(prog,
                                      description="Log in and launch FFXIV game.",
                                      epilog=FORMATTABLE_STRING_DESCRIPTION,
@@ -841,8 +872,12 @@ def __main__(prog, *args):
             try:
                 import pyotp
             except ImportError:
-                print("You need to install pyotp to use otp-key feature. Run `python -m pip install pyotp`.")
-                return -1
+                print("You need to install pyotp to use otp-key feature.")
+                pyotp = install_dependency(package_dir, "pyotp")["pyotp"]
+                if pyotp == -1:
+                    return -1
+                else:
+                    pyotp = pyotp["uotp"]
 
             args.otp = pyotp.TOTP(args.otp_key).now()
 
@@ -850,8 +885,12 @@ def __main__(prog, *args):
             try:
                 import uotp.token
             except ImportError:
-                print("You need to install uotp to use otp-key feature. Run `python -m pip install uotp`.")
-                return -1
+                print("You need to install uotp to use otp-key feature.")
+                uotp = install_dependency(package_dir, "uotp")
+                if uotp == -1:
+                    return -1
+                else:
+                    uotp = uotp["uotp"]
 
             oid, seed = args.otp_key.split(":")
             oid = int(oid)
