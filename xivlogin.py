@@ -300,17 +300,25 @@ class XivLoginError(ValueError):
 
 
 class XivClientRegion(enum.IntEnum):
-    International = 0
-    Korean = 1
+    Japan = 1
+    America = 2
+    Europe = 3
+    Korea = 101
 
     @classmethod
     def parse(cls, x):
         if x is None:
-            return XivClientRegion.International
+            return XivClientRegion.Japan
         if isinstance(x, str) and len(x) >= 1:
             if x[0].lower() == 'k':
-                return XivClientRegion.Korean
-        return XivClientRegion.International
+                return XivClientRegion.Korea
+            if x[0].lower() == 'j':
+                return XivClientRegion.Japan
+            if x[0].lower() == 'a':
+                return XivClientRegion.America
+            if x[0].lower() == 'e':
+                return XivClientRegion.Europe
+        return XivClientRegion.Japan
 
 
 class XivLanguage(enum.IntEnum):
@@ -453,7 +461,7 @@ class XivInternationalLogin:
                  computer_id: typing.Optional[bytes] = None,
                  language: XivLanguage = XivLanguage.English,
                  is_steam: bool = False,
-                 region: int = 3,
+                 region: XivClientRegion = XivClientRegion.Japan,
                  xiv_dir: typing.Optional[str] = None,
                  proxy: typing.Optional[str] = None,
                  ):
@@ -527,7 +535,7 @@ class XivInternationalLogin:
         stored = self._request(
             self._LANDING_URL + "?" + urllib.parse.urlencode({
                 "lng": "en",
-                "rgn": self._region,
+                "rgn": self._region.value,
                 "isft": 0,
                 "cssmode": 1,
                 "isnew": 1,
@@ -603,7 +611,7 @@ class XivInternationalLogin:
             f"DEV.MaxEntitledExpansionID={max_ex}",
             f"DEV.TestSID={game_sid}",
             f"DEV.UseSqPack=1",
-            f"SYS.Region=2",
+            f"SYS.Region={self._region.value}",
             f"language={self._language.value}",
             f"ver={self._version.game}",
         )
@@ -868,20 +876,7 @@ def __main__(prog, *args):
         if args.otp:
             raise ValueError("Cannot provide both otp and otp key.")
 
-        if args.client_region == XivClientRegion.International:
-            try:
-                import pyotp
-            except ImportError:
-                print("You need to install pyotp to use otp-key feature.")
-                pyotp = install_dependency(package_dir, "pyotp")["pyotp"]
-                if pyotp == -1:
-                    return -1
-                else:
-                    pyotp = pyotp["uotp"]
-
-            args.otp = pyotp.TOTP(args.otp_key).now()
-
-        elif args.client_region == XivClientRegion.Korean:
+        if args.client_region == XivClientRegion.Korean:
             try:
                 import uotp.token
             except ImportError:
@@ -897,11 +892,25 @@ def __main__(prog, *args):
             seed = base64.decodebytes(seed.encode())
             args.otp = uotp.token.OTPTokenGenerator(oid, seed).generate_token()
 
+        else:
+            try:
+                import pyotp
+            except ImportError:
+                print("You need to install pyotp to use otp-key feature.")
+                pyotp = install_dependency(package_dir, "pyotp")["pyotp"]
+                if pyotp == -1:
+                    return -1
+                else:
+                    pyotp = pyotp["uotp"]
+
+            args.otp = pyotp.TOTP(args.otp_key).now()
+
     elif not args.otp:
         args.otp = ""
 
     if args.debug:
         print(args)
+        os.system("pause")
         return 0
       
     if args.encrypt:
@@ -982,10 +991,11 @@ def __main__(prog, *args):
                     fp.write(cipher.nonce+salt+cpdata)
         return 0
       
-    if args.client_region == XivClientRegion.International:
+    if args.client_region in (XivClientRegion.Japan, XivClientRegion.America, XivClientRegion.Europe):
         print(f"Logging in as {args.user}... (steam={args.is_steam}, language={args.language.name})")
         XivInternationalLogin(language=args.language,
                               xiv_dir=args.xiv_dir,
+                              region=args.client_region,
                               is_steam=args.is_steam,
                               proxy=args.proxy,
                               ).login(args.user, args.password, args.otp)
