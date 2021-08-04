@@ -876,7 +876,7 @@ def __main__(prog, *args):
         if args.otp:
             raise ValueError("Cannot provide both otp and otp key.")
 
-        if args.client_region == XivClientRegion.Korean:
+        if args.client_region == XivClientRegion.Korea:
             try:
                 import uotp.token
             except ImportError:
@@ -1000,7 +1000,7 @@ def __main__(prog, *args):
                               proxy=args.proxy,
                               ).login(args.user, args.password, args.otp)
 
-    elif args.client_region == XivClientRegion.Korean:
+    elif args.client_region == XivClientRegion.Korea:
         XivKoreaLogin(xiv_dir=args.xiv_dir, proxy=args.proxy).login(args.user, args.password, args.otp)
 
     if not args.chain:
