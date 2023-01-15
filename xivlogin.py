@@ -12,11 +12,13 @@ import json
 import os
 import platform
 import re
+import ssl
 import struct
 import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import typing
 import urllib.parse
 import urllib.request
@@ -420,7 +422,17 @@ def request(url: str,
         if proxy.username is not None or proxy.password is not None:
             auth = base64.b64encode(f'{proxy.username or ""}:{proxy.password or ""}')
             req.headers["Proxy-Authorization"] = f"Basic {auth}"
-    resp: urllib.response.addinfourl = urllib.request.urlopen(req)
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_default_certs()
+    context.set_ciphers("DEFAULT@SECLEVEL=1")
+    try:
+        resp: urllib.response.addinfourl = urllib.request.urlopen(req, context=context)
+    except:
+        print(url)
+        print(data)
+        print(headers)
+        raise
     if resp.code // 100 != 2:
         raise RuntimeError(f"Remote error {resp.code}")
     return resp
@@ -596,6 +608,8 @@ class XivInternationalLogin:
         text = session.read().decode("utf-8")
         if text != "":
             print("\t=> Launcher needs update. Running ffxivboot.")
+            with open(os.path.join(os.getenv("TEMP"), "ffxiv_update.txt"), "w") as fp:
+                fp.write(text)
             self._exec_launcher()
             raise XivGameNeedPatchException(text)
         return session.headers.get("X-Patch-Unique-Id")
@@ -1022,7 +1036,13 @@ if __name__ == "__main__":
         exit(__main__(*sys.argv))
     except KeyboardInterrupt:
         print("\t=> Operation canceled.")
+        os.system("pause")
         exit(-1)
     except (XivLoginError, XivBootNeedPatchException, XivGameNeedPatchException) as e:
         print(f"\t=> Error: {e}")
+        os.system("pause")
+        exit(-1)
+    except Exception as e:
+        traceback.print_exc()
+        os.system("pause")
         exit(-1)
