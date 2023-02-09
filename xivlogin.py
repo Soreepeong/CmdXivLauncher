@@ -365,8 +365,9 @@ class XivVersionInfo:
         "ffxivupdater64.exe",
     )
 
-    def __init__(self, xiv_dir: str):
+    def __init__(self, xiv_dir: str, force_base: bool = False):
         self._xiv_dir = xiv_dir
+        self._force_base = force_base
 
     @functools.cache
     def _load_version(self, *path):
@@ -382,6 +383,8 @@ class XivVersionInfo:
 
     @functools.cached_property
     def game(self):
+        if self._force_base:
+            return XivVersionInfo._BASE_GAME_VERSION
         return self._load_version("game", "ffxivgame.ver")
 
     @functools.cache
@@ -399,7 +402,10 @@ class XivVersionInfo:
                     boot_hash.append(f"{f}/{fp.tell()}/{sha1.hexdigest().lower()}")
             return f'{self.boot}={",".join(boot_hash)}'
 
-        ver = self._load_version("game", "sqpack", f"ex{ex_ver}", f"ex{ex_ver}.ver")
+        if self._force_base:
+            ver = XivVersionInfo._BASE_GAME_VERSION
+        else:
+            ver = self._load_version("game", "sqpack", f"ex{ex_ver}", f"ex{ex_ver}.ver")
         return f"{self.hash(ex_ver - 1)}\nex{ex_ver}\t{ver}"
 
 
@@ -476,6 +482,7 @@ class XivInternationalLogin:
                  region: XivClientRegion = XivClientRegion.Japan,
                  xiv_dir: typing.Optional[str] = None,
                  proxy: typing.Optional[str] = None,
+                 force_base: bool = False,
                  ):
         if xiv_dir is None:
             r = subprocess.Popen([
@@ -497,7 +504,7 @@ class XivInternationalLogin:
         self._xiv_dir = xiv_dir
         self._region = region
         self._proxy = proxy
-        self._version = XivVersionInfo(xiv_dir)
+        self._version = XivVersionInfo(xiv_dir, force_base)
 
         if computer_id is None:
             computer_id = struct.pack("I", functools.reduce(
@@ -856,6 +863,8 @@ def __main__(prog, *args):
                         type=XivLanguage.parse, dest="language", default=XivLanguage.parse(None),
                         help="Language. Available values are E(nglish), F(rench), G(erman), and J(apanese). Use system "
                              "language if not specified, and will fall back to English if unavailable.")
+    parser.add_argument("-b", "--force-base", action="store_true", dest="force_base",
+                        help="Force base game version.")
     parser.add_argument("-s", "--steam", action="store_true", dest="is_steam",
                         help="Identify as running from steam.")
     parser.add_argument("-u", "--user", action="store", required=True,
@@ -1012,6 +1021,7 @@ def __main__(prog, *args):
                               region=args.client_region,
                               is_steam=args.is_steam,
                               proxy=args.proxy,
+                              force_base=args.force_base,
                               ).login(args.user, args.password, args.otp)
 
     elif args.client_region == XivClientRegion.Korea:
