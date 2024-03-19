@@ -392,7 +392,10 @@ class XivVersionInfo:
         if ex_ver == 0:
             boot_hash = []
             for f in self._FILES_TO_HASH:
-                with open(os.path.join(self._xiv_dir, "boot", f), "rb") as fp:
+                fpath = os.path.join(self._xiv_dir, "boot", f)
+                if not os.path.exists(fpath):
+                    continue
+                with open(fpath, "rb") as fp:
                     sha1 = hashlib.sha1()
                     while True:
                         buf = fp.read(8192)
