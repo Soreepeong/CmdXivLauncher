@@ -108,7 +108,8 @@ def formatted_str_generator(key: str, descr: str, input_fn: callable = input):
                 from Crypto.Cipher import AES
                 from Crypto.Random import get_random_bytes
             except ImportError:
-                print("You need to install pycryptodom and argon2-cffi to use the encryption feature. Run `python -m pip install pycryptodom argon2-cffi`.")
+                print(
+                    "You need to install pycryptodom and argon2-cffi to use the encryption feature. Run `python -m pip install pycryptodom argon2-cffi`.")
                 return -1
             data_source_type, data_source = data.split(",", 1)
             try:
@@ -138,7 +139,7 @@ def formatted_str_generator(key: str, descr: str, input_fn: callable = input):
                                 type=argon2.Type.ID
                             ),
                             AES.MODE_CTR,
-                            nonce = data[:8],
+                            nonce=data[:8],
                         )
                         data = cipher.decrypt(data[16:]).decode(encoding='utf-8')
                         decrypted_cache[data_source] = data
@@ -451,6 +452,7 @@ def run_and_wait(*args):
     proc_info = CreateProcessInformation()
     start_info = CreateProcessStartupInfoW()
     start_info.cb = ctypes.sizeof(start_info)
+    print(" ".join(f'"{x}"' if ' ' in x else x for x in args))
 
     if not ctypes.windll.kernel32.CreateProcessW(
             args[0], " ".join(f'"{x}"' if ' ' in x else x for x in args), None, None, True, 0, None, None,
@@ -545,8 +547,10 @@ class XivInternationalLogin:
 
     def _check_boot_version(self):
         print("* Checking boot version...")
-        req = self._request(self._BOOT_PATCH_CHECK_URL_FORMAT.format(boot_ver=self._version.boot,
-                                                                     timestamp=datetime.datetime.utcnow()))
+        req = self._request(
+            self._BOOT_PATCH_CHECK_URL_FORMAT.format(
+                boot_ver=self._version.boot,
+                timestamp=datetime.datetime.now(datetime.timezone.utc)))
         text = req.read().decode("utf-8")
         if text != "":
             print("\t=> Launcher needs update. Running ffxivboot.")
@@ -808,12 +812,12 @@ class XivKoreaLogin:
         print("* Starting game...")
         run_and_wait(
             os.path.join(self._xiv_dir, "game", "ffxiv_dx11.exe"),
-            f"DEV.LobbyHost01=lobbyf-live.ff14.co.kr",
+            f"DEV.LobbyHost01=nlobbyf-live.ff14.co.kr",
             f"DEV.LobbyPort01=54994",
-            f"DEV.GMServerHost=gm-live.ff14.co.kr",
+            f"DEV.GMServerHost=ngm-live.ff14.co.kr",
             f"DEV.TestSID={token}",
             f"SYS.resetConfig=0",
-            f"DEV.SaveDataBankHost=config-dl-live.ff14.co.kr",
+            f"DEV.SaveDataBankHost=nconfig-dl-live.ff14.co.kr",
         )
 
 
@@ -889,6 +893,8 @@ def __main__(prog, *args):
                         help="Run chain as admin.")
     parser.add_argument("-d", "--debug", action="store_true",
                         help="Print parsed argument and exit instead of logging in.")
+    parser.add_argument("-e", "--environment", action="append", dest="environment",
+                        help="Environment variables to set for the game process.")
     parser.add_argument("--enc", action="store", type=str, dest="encrypt", default=None,
                         help="Instead of logging in, generate encrypted files with parameters as contents. "
                              "Encoded value is accepted. If no passphrase is provided, it will be provided "
@@ -917,6 +923,8 @@ def __main__(prog, *args):
             oid = int(oid)
             seed = base64.decodebytes(seed.encode())
             args.otp = uotp.token.OTPTokenGenerator(oid, seed).generate_token()
+            print(args.otp)
+            os.system("pause")
 
         else:
             try:
@@ -938,7 +946,7 @@ def __main__(prog, *args):
         print(args)
         os.system("pause")
         return 0
-      
+
     if args.encrypt:
         try:
             import argon2
@@ -946,7 +954,8 @@ def __main__(prog, *args):
             from Crypto.Cipher import AES
             from Crypto.Random import get_random_bytes
         except ImportError:
-            print("You need to install pycryptodom and argon2-cffi to use the encryption feature. Run `python -m pip install pycryptodom argon2-cffi`.")
+            print(
+                "You need to install pycryptodom and argon2-cffi to use the encryption feature. Run `python -m pip install pycryptodom argon2-cffi`.")
             return -1
         passphrase = None
         enc_files = args.encrypt.split(';')
@@ -1012,11 +1021,15 @@ def __main__(prog, *args):
                 )
                 cpdata = cipher.encrypt(data)
                 if enc_file == '-':
-                    sys.stdout.buffer.write(cipher.nonce+salt+cpdata)
+                    sys.stdout.buffer.write(cipher.nonce + salt + cpdata)
                 with open(enc_file, 'wb') as fp:
-                    fp.write(cipher.nonce+salt+cpdata)
+                    fp.write(cipher.nonce + salt + cpdata)
         return 0
-      
+
+    for envvar in args.environment:
+        k, v = envvar.split('=', 2)
+        os.environ[k] = v
+
     if args.client_region in (XivClientRegion.Japan, XivClientRegion.America, XivClientRegion.Europe):
         print(f"Logging in as {args.user}... (steam={args.is_steam}, language={args.language.name})")
         XivInternationalLogin(language=args.language,
@@ -1037,6 +1050,8 @@ def __main__(prog, *args):
     info.cbSize = ctypes.sizeof(info)
     info.lpVerb = "runas" if args.admin_chain else "open"
     info.lpFile = args.chain[0]
+    print(" ".join(args.chain[1:]) if len(args.chain) > 1 else "");
+    os.system("pause")
     info.lpParameters = " ".join(args.chain[1:]) if len(args.chain) > 1 else ""
     info.nShow = 1
     if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(info)):
