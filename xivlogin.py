@@ -236,6 +236,32 @@ class ShellExecuteInfoW(ctypes.Structure):
     )
 
 
+class CredentialW(ctypes.Structure):
+    _fields_ = (
+        ("Flags", ctypes.wintypes.DWORD),
+        ("Type", ctypes.wintypes.DWORD),
+        ("TargetName", ctypes.wintypes.LPWSTR),
+        ("Comment", ctypes.wintypes.LPWSTR),
+        ("LastWritten", ctypes.wintypes.FILETIME),
+        ("CredentialBlobSize", ctypes.wintypes.DWORD),
+        ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+        ("Persist", ctypes.wintypes.DWORD),
+        ("AttributeCount", ctypes.wintypes.DWORD),
+        ("Attributes", ctypes.wintypes.LPVOID),
+        ("TargetAlias", ctypes.wintypes.LPWSTR),
+        ("UserName", ctypes.wintypes.LPWSTR),
+    )
+
+
+LRESULT = ctypes.c_ssize_t
+WM_APP = 0x8000
+SMTO_ABORTIFHUNG = 0x0002
+XIVALEXANDER_RELOAD_LOGIN_SESSIONS = WM_APP + 0x100
+XIVALEXANDER_RELOAD_TIMEOUT_MS = 3000
+XIVALEXANDER_CREDENTIAL_TARGET_PREFIX = "XivAlexander/LoginSession/"
+CRED_TYPE_GENERIC = 1
+CRED_PERSIST_LOCAL_MACHINE = 2
+XIVALEXANDER_MAIN_WINDOW_CLASS = "XivAlexander::Window::MainWindow"
 ctypes.windll.kernel32.CreateProcessW.argtypes = (
     ctypes.wintypes.LPCWSTR, ctypes.wintypes.LPWSTR, ctypes.wintypes.LPVOID, ctypes.wintypes.LPVOID,
     ctypes.wintypes.BOOL, ctypes.wintypes.DWORD, ctypes.wintypes.LPVOID, ctypes.wintypes.LPCWSTR,
@@ -244,9 +270,26 @@ ctypes.windll.kernel32.CreateProcessW.argtypes = (
 ctypes.windll.kernel32.CreateProcessW.restype = ctypes.wintypes.BOOL
 ctypes.windll.kernel32.CloseHandle.argtypes = ctypes.wintypes.HANDLE,
 ctypes.windll.kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+ctypes.windll.kernel32.CreateMutexW.argtypes = ctypes.wintypes.LPVOID, ctypes.wintypes.BOOL, ctypes.wintypes.LPCWSTR
+ctypes.windll.kernel32.CreateMutexW.restype = ctypes.wintypes.HANDLE
+ctypes.windll.kernel32.ReleaseMutex.argtypes = ctypes.wintypes.HANDLE,
+ctypes.windll.kernel32.ReleaseMutex.restype = ctypes.wintypes.BOOL
+ctypes.windll.kernel32.WaitForSingleObject.argtypes = ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD
+ctypes.windll.kernel32.WaitForSingleObject.restype = ctypes.wintypes.DWORD
+WAIT_TIMEOUT = 0x102
+GAME_LANUCH_MUTEX_NAME = "Local\\CmdXivLauncher.GameHandoff"
 ctypes.windll.user32.FindWindowExW.argtypes = (ctypes.wintypes.HWND, ctypes.wintypes.HWND, ctypes.wintypes.LPCWSTR,
                                                ctypes.wintypes.LPCWSTR)
 ctypes.windll.user32.FindWindowExW.restype = ctypes.wintypes.HWND
+ctypes.windll.user32.GetWindowThreadProcessId.argtypes = ctypes.wintypes.HWND, ctypes.wintypes.LPDWORD
+ctypes.windll.user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
+ctypes.windll.user32.SendMessageTimeoutW.argtypes = (
+    ctypes.wintypes.HWND, ctypes.wintypes.UINT, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM,
+    ctypes.wintypes.UINT, ctypes.wintypes.UINT, ctypes.POINTER(ctypes.c_size_t),
+)
+ctypes.windll.user32.SendMessageTimeoutW.restype = LRESULT
+ctypes.windll.advapi32.CredWriteW.argtypes = ctypes.POINTER(CredentialW), ctypes.wintypes.DWORD
+ctypes.windll.advapi32.CredWriteW.restype = ctypes.wintypes.BOOL
 ctypes.windll.shell32.ShellExecuteExW.argtypes = ctypes.POINTER(ShellExecuteInfoW),
 ctypes.windll.shell32.ShellExecuteExW.restype = ctypes.wintypes.BOOL
 
@@ -299,6 +342,10 @@ class XivGameNeedPatchException(EnvironmentError):
 
 
 class XivLoginError(ValueError):
+    pass
+
+
+class XivRunningGameError(EnvironmentError):
     pass
 
 
@@ -469,6 +516,128 @@ def run_and_wait(*args):
         ctypes.windll.kernel32.CloseHandle(proc_info.hProcess)
 
 
+class GameLaunchLock:
+    def __init__(self):
+        self._handle = None
+
+    def __enter__(self):
+        self._handle = ctypes.windll.kernel32.CreateMutexW(None, False, GAME_LANUCH_MUTEX_NAME)
+        if not self._handle:
+            raise ctypes.WinError()
+        res = ctypes.windll.kernel32.WaitForSingleObject(self._handle, 0)
+        if res == WAIT_TIMEOUT:
+            print("* Waiting for another login to finish handing its session to a game...")
+            res = ctypes.windll.kernel32.WaitForSingleObject(self._handle, INFINITE)
+        if res == WAIT_FAILED:
+            err = ctypes.WinError()
+            ctypes.windll.kernel32.CloseHandle(self._handle)
+            self._handle = None
+            raise err
+        # WAIT_OBJECT_0, or WAIT_ABANDONED if the previous holder died; either way it is ours now
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        ctypes.windll.kernel32.ReleaseMutex(self._handle)
+        ctypes.windll.kernel32.CloseHandle(self._handle)
+        self._handle = None
+
+
+def send_session_to_xivalexander(alias: str, running_pid: typing.Optional[int], launch_args: typing.Sequence[str]) -> bool:
+    # held from storing through notifying, so that "select the most recently written" means this session
+    with GameLaunchLock():
+        # resolved again, as another login might have started or ended a game meanwhile
+        running_hwnd = None if running_pid is None else find_xivalexander_window(running_pid)
+        store_session(alias, launch_args[1:])
+        notify_running_games(running_hwnd)
+        if running_hwnd is not None:
+            return True
+
+        print("* Starting game...")
+        run_and_wait(*launch_args)
+        return False
+
+
+def list_xivalexander_windows() -> typing.List[typing.Tuple[int, int]]:
+    res = []
+    hwnd = None
+    while True:
+        hwnd = ctypes.windll.user32.FindWindowExW(None, hwnd, XIVALEXANDER_MAIN_WINDOW_CLASS, None)
+        if not hwnd:
+            break
+        pid = ctypes.wintypes.DWORD()
+        if ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)):
+            res.append((hwnd, pid.value))
+    return res
+
+
+def find_xivalexander_window(pid: int = 0, verbose: bool = True) -> typing.Optional[int]:
+    windows = list_xivalexander_windows()
+    if pid:
+        windows = [x for x in windows if x[1] == pid]
+        if not windows:
+            if verbose:
+                print(f"* No running game with XivAlexander found for PID {pid}; a new game will be started.")
+            return None
+        return windows[0][0]
+    if not windows:
+        if verbose:
+            print("* No running game with XivAlexander found; a new game will be started.")
+        return None
+    if len(windows) > 1:
+        raise XivRunningGameError("Multiple running games with XivAlexander found; specify one of PIDs: "
+                                  + ", ".join(str(x) for x in sorted(x[1] for x in windows)))
+    return windows[0][0]
+
+
+def store_session(alias: str, arguments: typing.Sequence[str]):
+    # the whole command line less the program, so that XivAlexander can also start a game launched without one
+    payload = json.dumps({"Alias": alias, "Arguments": list(arguments)}, ensure_ascii=False).encode("utf-8")
+    blob = (ctypes.c_ubyte * len(payload)).from_buffer_copy(payload)
+    cred = CredentialW()
+    cred.Type = CRED_TYPE_GENERIC
+    cred.TargetName = XIVALEXANDER_CREDENTIAL_TARGET_PREFIX + alias
+    cred.UserName = alias
+    cred.CredentialBlobSize = len(payload)
+    cred.CredentialBlob = blob
+    cred.Persist = CRED_PERSIST_LOCAL_MACHINE
+    try:
+        if not ctypes.windll.advapi32.CredWriteW(ctypes.byref(cred), 0):
+            raise ctypes.WinError()
+    finally:
+        ctypes.memset(blob, 0, len(payload))
+
+
+def send_reload(hwnd: int, select: bool) -> typing.Optional[int]:
+    result = ctypes.c_size_t()
+    if not ctypes.windll.user32.SendMessageTimeoutW(hwnd, XIVALEXANDER_RELOAD_LOGIN_SESSIONS, 1 if select else 0, 0,
+                                                    SMTO_ABORTIFHUNG, XIVALEXANDER_RELOAD_TIMEOUT_MS,
+                                                    ctypes.byref(result)):
+        return None
+    return result.value
+
+
+def notify_running_games(selected_hwnd: typing.Optional[int]):
+    windows = list_xivalexander_windows()
+    if selected_hwnd is not None and all(hwnd != selected_hwnd for hwnd, _ in windows):
+        raise XivRunningGameError("The selected running game is no longer running.")
+    if not windows:
+        return
+    print("* Sharing session with running games...")
+    selected_error = None
+    for hwnd, pid in windows:
+        selected = hwnd == selected_hwnd
+        res = send_reload(hwnd, selected)
+        if res == 1:
+            print(f"\t=> PID {pid}: {'selected' if selected else 'added'}.")
+            continue
+        reason = "no response" if res is None else f"rejected (result {res})"
+        print(f"\t=> PID {pid}: {reason}.")
+        if selected:
+            selected_error = f"Running game (PID {pid}) did not accept the session: {reason}."
+    if selected_error is not None:
+        raise XivRunningGameError(selected_error)
+
+
 class XivInternationalLogin:
     _WEB_USER_AGENT_FORMAT = "SQEXAuthor/2.0.0(Windows 6.2; ja-jp; {computer_id})"
     _BOOT_PATCH_CHECK_URL_FORMAT = ("http://patch-bootver.ffxiv.com/http/win32/ffxivneo_release_boot/{boot_ver}/"
@@ -628,21 +797,20 @@ class XivInternationalLogin:
             raise XivGameNeedPatchException(text)
         return session.headers.get("X-Patch-Unique-Id")
 
-    def login(self, user_id: str, password: str, otp: str):
+    def login(self, user_id: str, password: str, otp: str, running_pid: typing.Optional[int] = None) -> bool:
         self._check_boot_version()
         max_ex, web_sid = self._login(user_id, password, otp)
         game_sid = self._get_game_sid(web_sid, max_ex)
-        print("* Starting game...")
-        run_and_wait(
-            os.path.join(self._xiv_dir, "game", "ffxiv_dx11.exe"),
-            f"DEV.DataPathType=1",
-            f"DEV.MaxEntitledExpansionID={max_ex}",
-            f"DEV.TestSID={game_sid}",
-            f"DEV.UseSqPack=1",
-            f"SYS.Region={self._region.value}",
-            f"language={self._language.value}",
-            f"ver={self._version.game}",
-        )
+        return send_session_to_xivalexander(user_id, running_pid, (
+                                    os.path.join(self._xiv_dir, "game", "ffxiv_dx11.exe"),
+                                    f"DEV.DataPathType=1",
+                                    f"DEV.MaxEntitledExpansionID={max_ex}",
+                                    f"DEV.TestSID={game_sid}",
+                                    f"DEV.UseSqPack=1",
+                                    f"SYS.Region={self._region.value}",
+                                    f"language={self._language.value}",
+                                    f"ver={self._version.game}",
+                                ))
 
 
 class FormReader(html.parser.HTMLParser):
@@ -713,7 +881,7 @@ class XivKoreaLogin:
         headers.update(self._COMMON_HEADERS)
         return request(self._BASE_URL + url, data, headers, self._proxy)
 
-    def login(self, user_id: str, password: str, otp: str):
+    def login(self, user_id: str, password: str, otp: str, running_pid: typing.Optional[int] = None) -> bool:
         print("* Initializing...")
         r = self._request("/")
         text = r.read().decode("utf-8")
@@ -809,16 +977,15 @@ class XivKoreaLogin:
         d = json.loads(r.read().decode())
         token = d["toKen"]
 
-        print("* Starting game...")
-        run_and_wait(
-            os.path.join(self._xiv_dir, "game", "ffxiv_dx11.exe"),
-            f"DEV.LobbyHost01=nlobbyf-live.ff14.co.kr",
-            f"DEV.LobbyPort01=54994",
-            f"DEV.GMServerHost=ngm-live.ff14.co.kr",
-            f"DEV.TestSID={token}",
-            f"SYS.resetConfig=0",
-            f"DEV.SaveDataBankHost=nconfig-dl-live.ff14.co.kr",
-        )
+        return send_session_to_xivalexander(user_id, running_pid, (
+                                    os.path.join(self._xiv_dir, "game", "ffxiv_dx11.exe"),
+                                    f"DEV.LobbyHost01=nlobbyf-live.ff14.co.kr",
+                                    f"DEV.LobbyPort01=54994",
+                                    f"DEV.GMServerHost=ngm-live.ff14.co.kr",
+                                    f"DEV.TestSID={token}",
+                                    f"SYS.resetConfig=0",
+                                    f"DEV.SaveDataBankHost=nconfig-dl-live.ff14.co.kr",
+                                ))
 
 
 @functools.cache
@@ -895,6 +1062,9 @@ def __main__(prog, *args):
                         help="Print parsed argument and exit instead of logging in.")
     parser.add_argument("-e", "--environment", action="append", dest="environment",
                         help="Environment variables to set for the game process.")
+    parser.add_argument("-r", "--running", action="store", nargs="?", const=0, default=None,
+                        type=int, dest="running_pid", metavar="PID",
+                        help="Let an existing XivAlexander instance handle the session, if it exists.")
     parser.add_argument("--enc", action="store", type=str, dest="encrypt", default=None,
                         help="Instead of logging in, generate encrypted files with parameters as contents. "
                              "Encoded value is accepted. If no passphrase is provided, it will be provided "
@@ -1026,24 +1196,36 @@ def __main__(prog, *args):
                     fp.write(cipher.nonce + salt + cpdata)
         return 0
 
-    for envvar in args.environment:
-        k, v = envvar.split('=', 2)
-        os.environ[k] = v
+    if args.environment:
+        for envvar in args.environment:
+            k, v = envvar.split('=', 2)
+            os.environ[k] = v
 
+    # check the target before logging in, so that a login session is not wasted; it is resolved again after login
+    if args.running_pid is not None:
+        find_xivalexander_window(args.running_pid, verbose=False)
+
+    sent_to_running_game = False
     if args.client_region in (XivClientRegion.Japan, XivClientRegion.America, XivClientRegion.Europe):
         print(f"Logging in as {args.user}... (steam={args.is_steam}, language={args.language.name})")
-        XivInternationalLogin(language=args.language,
-                              xiv_dir=args.xiv_dir,
-                              region=args.client_region,
-                              is_steam=args.is_steam,
-                              proxy=args.proxy,
-                              force_base=args.force_base,
-                              ).login(args.user, args.password, args.otp)
+        sent_to_running_game = XivInternationalLogin(
+            language=args.language,
+            xiv_dir=args.xiv_dir,
+            region=args.client_region,
+            is_steam=args.is_steam,
+            proxy=args.proxy,
+            force_base=args.force_base,
+        ).login(args.user, args.password, args.otp, args.running_pid)
 
     elif args.client_region == XivClientRegion.Korea:
-        XivKoreaLogin(xiv_dir=args.xiv_dir, proxy=args.proxy).login(args.user, args.password, args.otp)
+        sent_to_running_game = XivKoreaLogin(xiv_dir=args.xiv_dir, proxy=args.proxy).login(
+            args.user, args.password, args.otp, args.running_pid)
 
     if not args.chain:
+        return 0
+
+    if sent_to_running_game:
+        print("* Skipping chain, as the session was sent to a running game.")
         return 0
 
     info = ShellExecuteInfoW()
@@ -1066,7 +1248,7 @@ if __name__ == "__main__":
         print("\t=> Operation canceled.")
         os.system("pause")
         exit(-1)
-    except (XivLoginError, XivBootNeedPatchException, XivGameNeedPatchException) as e:
+    except (XivLoginError, XivBootNeedPatchException, XivGameNeedPatchException, XivRunningGameError) as e:
         print(f"\t=> Error: {e}")
         os.system("pause")
         exit(-1)

@@ -3,7 +3,7 @@
 Log in and run international FFXIV game client via command line.
 
 ## Usage
-usage: xivlogin.py [-h] [-i XIV_DIR] [-l LANGUAGE] [-s] -u USER -p PASSWORD [-o OTP] [-k OTP_KEY] [-x PROXY] [-a] [-d] [--enc ENCRYPT] ...
+usage: xivlogin.py [-h] [-i XIV_DIR] [-l LANGUAGE] [-s] -u USER -p PASSWORD [-o OTP] [-k OTP_KEY] [-x PROXY] [-a] [-d] [-r [PID]] [--enc ENCRYPT] ...
 
 Log in and launch FFXIV game.
 
@@ -30,6 +30,8 @@ optional arguments:
                         Proxy URL to use in format of http://0.0.0.0:80
   -a, --admin-chain     Run chain as admin.
   -d, --debug           Print parsed argument and exit instead of logging in.
+  -r [PID], --running [PID]
+                        Let an existing XivAlexander instance handle the session, if it exists.
   --enc ENCRYPT         Instead of logging in, generate encrypted files with parameters as contents. Encoded value is accepted. If no passphrase is provided, it will be provided interactively.
                         If passphrase is only given for some files and not others, the passphrase given for the previous file will be used. If the parameter is just a path, it will be
                         interpreted as storing all given parameters to the file as a json format.
